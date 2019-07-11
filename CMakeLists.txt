@@ -149,11 +149,19 @@ endif()
 string(TOLOWER ${CMAKE_SYSTEM_NAME} swift_os)
 get_swift_host_arch(swift_host_arch)
 
+if(CMAKE_SYSTEM_NAME STREQUAL Darwin)
+  set(install_target_dir "${CMAKE_INSTALL_FULL_LIBDIR}/swift/${swift_os}/")
+  set(install_target_dir_swiftmodules "${CMAKE_INSTALL_FULL_LIBDIR}/swift/${swift_os}/${swift_host_arch}")
+else()
+  set(install_target_dir "${CMAKE_INSTALL_FULL_LIBDIR}/swift/${swift_os}/${swift_host_arch}")
+  set(install_target_dir_swiftmodules "${CMAKE_INSTALL_FULL_LIBDIR}/swift/${swift_os}/${swift_host_arch}")
+endif()
+
 install(FILES
           ${CMAKE_CURRENT_BINARY_DIR}/swift/XCTest.swiftdoc
           ${CMAKE_CURRENT_BINARY_DIR}/swift/XCTest.swiftmodule
         DESTINATION
-          ${CMAKE_INSTALL_FULL_LIBDIR}/swift/${swift_os}/${swift_host_arch})
+          ${install_target_dir_swiftmodules})
 install(FILES
           ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}XCTest${CMAKE_SHARED_LIBRARY_SUFFIX}
         DESTINATION
@@ -162,5 +170,5 @@ install(FILES
 install(FILES
           ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}XCTest${CMAKE_SHARED_LIBRARY_SUFFIX}
         DESTINATION
-          ${CMAKE_INSTALL_FULL_LIBDIR}/swift/${swift_os})
+          ${install_target_dir})
 
