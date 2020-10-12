@@ -8,24 +8,30 @@ project(XCTest
         LANGUAGES
           C)
 
+enable_testing()
+option(ENABLE_TESTING "Build tests" YES)
+
+option(BUILD_SHARED_LIBS "Build shared libraries" ON)
+
 option(XCTEST_PATH_TO_LIBDISPATCH_SOURCE "Path to libdispatch source" "")
 option(XCTEST_PATH_TO_LIBDISPATCH_BUILD "Path to libdispatch build" "")
 
 option(XCTEST_PATH_TO_FOUNDATION_BUILD "Path to Foundation build" "")
 
-option(XCTEST_PATH_TO_COREFOUNDATION_BUILD "Path to CoreFoundation build" "")
+if(ENABLE_TESTING)
+  find_package(LLVM CONFIG)
+  if(LLVM_FOUND)
+    message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
+    message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 
-find_package(LLVM CONFIG)
-if(NOT LLVM_FOUND)
-  message(SEND_ERROR "Could not find LLVM; configure with -DCMAKE_PREFIX_PATH=/path/to/llvm/install")
+    include(${LLVM_DIR}/LLVMConfig.cmake)
+
+    list(APPEND CMAKE_MODULE_PATH ${LLVM_DIR})
+    include(AddLLVM)
+  elseif(NOT DEFINED LLVM_MAIN_SRC_DIR OR NOT EXISTS ${LLVM_MAIN_SRC_DIR})
+    message(SEND_ERROR "LLVM not found and LLVM_MAIN_SRC_DIR not defined - required for testing")
+  endif()
 endif()
-message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
-message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
-
-include(${LLVM_DIR}/LLVMConfig.cmake)
-
-list(APPEND CMAKE_MODULE_PATH ${LLVM_DIR})
-include(AddLLVM)
 
 include(SwiftSupport)
 include(GNUInstallDirs)
@@ -35,6 +41,11 @@ if(CMAKE_BUILD_TYPE MATCHES Release)
   set(swift_optimization_flags -O)
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL Windows)
+  set(WORKAROUND_SR9138 -Xlinker;-ignore:4217)
+  set(WORKAROUND_SR9995 -Xlinker;-nodefaultlib:libcmt)
+endif()
+
 add_swift_library(XCTest
                   MODULE_NAME
                     XCTest
@@ -42,8 +53,6 @@ add_swift_library(XCTest
                     XCTest
                   MODULE_PATH
                     ${CMAKE_CURRENT_BINARY_DIR}/swift/XCTest.swiftmodule
-                  OUTPUT
-                    ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}XCTest${CMAKE_SHARED_LIBRARY_SUFFIX}
                   LINK_FLAGS
                     -L${XCTEST_PATH_TO_LIBDISPATCH_BUILD}
                     -L${XCTEST_PATH_TO_LIBDISPATCH_BUILD}/src -ldispatch
@@ -51,6 +60,9 @@ add_swift_library(XCTest
 
                     # compatibility with Foundation build_script.py
                     -L${XCTEST_PATH_TO_FOUNDATION_BUILD}/Foundation
+
+                    ${WORKAROUND_SR9138}
+                    ${WORKAROUND_SR9995}
                   SOURCES
                     Sources/XCTest/Private/WallClockTimeMetric.swift
                     Sources/XCTest/Private/TestListing.swift
@@ -81,6 +93,8 @@ add_swift_library(XCTest
                     Sources/XCTest/Public/Asynchronous/XCTWaiter.swift
                     Sources/XCTest/Public/Asynchronous/XCTestCase+Asynchronous.swift
                     Sources/XCTest/Public/Asynchronous/XCTestExpectation.swift
+                  TARGET
+                    ${CMAKE_C_COMPILER_TARGET}
                   SWIFT_FLAGS
                     ${swift_optimization_flags}
 
@@ -89,7 +103,7 @@ add_swift_library(XCTest
                     -Xcc -fblocks
 
                     -I${XCTEST_PATH_TO_FOUNDATION_BUILD}/swift
-                    -Fsystem ${XCTEST_PATH_TO_COREFOUNDATION_BUILD}/System/Library/Frameworks
+                    -Fsystem ${XCTEST_PATH_TO_FOUNDATION_BUILD}
 
                     # compatibility with Foundation build_script.py
                     -I${XCTEST_PATH_TO_FOUNDATION_BUILD}/Foundation
@@ -109,37 +123,47 @@ add_custom_command(TARGET
                   COMMENT
                     "Copying swiftmodule/swiftdoc to build directory")
 
-if(EXISTS ${LLVM_MAIN_SRC_DIR}/utils/lit/lit.py)
-  set(LIT_COMMAND "${PYTHON_EXECUTABLE};${LLVM_MAIN_SRC_DIR}/utils/lit/lit.py"
-      CACHE STRING "command used to spawn llvm-lit")
-else()
-  find_program(LIT_COMMAND NAMES llvm-lit lit.py lit)
+if(ENABLE_TESTING)
+  if(EXISTS ${LLVM_MAIN_SRC_DIR}/utils/lit/lit.py)
+    set(LIT_COMMAND "${LLVM_MAIN_SRC_DIR}/utils/lit/lit.py"
+        CACHE STRING "command used to spawn llvm-lit")
+  else()
+    find_program(LIT_COMMAND NAMES llvm-lit lit.py lit)
+  endif()
+  find_package(PythonInterp)
+  add_custom_target(check-xctest
+                    COMMAND
+                    ${CMAKE_COMMAND} -E env
+                      BUILT_PRODUCTS_DIR=${CMAKE_BINARY_DIR}
+                      FOUNDATION_BUILT_PRODUCTS_DIR=${XCTEST_PATH_TO_FOUNDATION_BUILD}
+                      LIBDISPATCH_SRC_DIR=${XCTEST_PATH_TO_LIBDISPATCH_SOURCE}
+                      LIBDISPATCH_BUILD_DIR=${XCTEST_PATH_TO_LIBDISPATCH_BUILD}
+                      LIBDISPATCH_OVERLAY_DIR=${XCTEST_PATH_TO_LIBDISPATCH_BUILD}/src/swift
+                      SWIFT_EXEC=${CMAKE_SWIFT_COMPILER}
+                      ${PYTHON_EXECUTABLE} ${LIT_COMMAND} -sv ${CMAKE_SOURCE_DIR}/Tests/Functional
+                    COMMENT
+                      "Running XCTest functional test suite"
+                    DEPENDS
+                      XCTest
+                    USES_TERMINAL)
 endif()
-add_custom_target(check-xctest
-                  COMMAND
-                  ${CMAKE_COMMAND} -E env
-                    BUILT_PRODUCTS_DIR=${CMAKE_BINARY_DIR}
-                    CORE_FOUNDATION_BUILT_PRODUCTS_DIR=${XCTEST_PATH_TO_COREFOUNDATION_BUILD}
-                    FOUNDATION_BUILT_PRODUCTS_DIR=${XCTEST_PATH_TO_FOUNDATION_BUILD}
-                    LIBDISPATCH_SRC_DIR=${XCTEST_PATH_TO_LIBDISPATCH_SOURCE}
-                    LIBDISPATCH_BUILD_DIR=${XCTEST_PATH_TO_LIBDISPATCH_BUILD}
-                    LIBDISPATCH_OVERLAY_DIR=${XCTEST_PATH_TO_LIBDISPATCH_BUILD}/src/swift
-                    SWIFT_EXEC=${CMAKE_SWIFT_COMPILER}
-                    ${LIT_COMMAND} -sv ${CMAKE_SOURCE_DIR}/Tests/Functional
-                  COMMENT
-                    "Running XCTest functional test suite"
-                  DEPENDS
-                    XCTest
-                  USES_TERMINAL)
 
 string(TOLOWER ${CMAKE_SYSTEM_NAME} swift_os)
 get_swift_host_arch(swift_host_arch)
+
+if(CMAKE_SYSTEM_NAME STREQUAL Darwin)
+  set(install_target_dir "${CMAKE_INSTALL_FULL_LIBDIR}/swift/${swift_os}/")
+  set(install_target_dir_swiftmodules "${CMAKE_INSTALL_FULL_LIBDIR}/swift/${swift_os}/${swift_host_arch}")
+else()
+  set(install_target_dir "${CMAKE_INSTALL_FULL_LIBDIR}/swift/${swift_os}/${swift_host_arch}")
+  set(install_target_dir_swiftmodules "${CMAKE_INSTALL_FULL_LIBDIR}/swift/${swift_os}/${swift_host_arch}")
+endif()
 
 install(FILES
           ${CMAKE_CURRENT_BINARY_DIR}/swift/XCTest.swiftdoc
           ${CMAKE_CURRENT_BINARY_DIR}/swift/XCTest.swiftmodule
         DESTINATION
-          ${CMAKE_INSTALL_FULL_LIBDIR}/swift/${swift_os}/${swift_host_arch})
+          ${install_target_dir_swiftmodules})
 install(FILES
           ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}XCTest${CMAKE_SHARED_LIBRARY_SUFFIX}
         DESTINATION
@@ -148,5 +172,5 @@ install(FILES
 install(FILES
           ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}XCTest${CMAKE_SHARED_LIBRARY_SUFFIX}
         DESTINATION
-          ${CMAKE_INSTALL_FULL_LIBDIR}/swift/${swift_os})
+          ${install_target_dir})
 

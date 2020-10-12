@@ -2,14 +2,47 @@
 include(CMakeParseArguments)
 
 function(add_swift_target target)
-  set(options LIBRARY)
+  set(options LIBRARY;SHARED;STATIC)
   set(single_value_options MODULE_NAME;MODULE_LINK_NAME;MODULE_PATH;MODULE_CACHE_PATH;OUTPUT;TARGET)
   set(multiple_value_options CFLAGS;DEPENDS;LINK_FLAGS;RESOURCES;SOURCES;SWIFT_FLAGS)
 
   cmake_parse_arguments(AST "${options}" "${single_value_options}" "${multiple_value_options}" ${ARGN})
 
   set(compile_flags ${CMAKE_SWIFT_FLAGS})
-  set(link_flags)
+  set(link_flags ${CMAKE_SWIFT_LINK_FLAGS})
+
+  if("${CMAKE_SYSTEM_NAME}" STREQUAL "Android")
+    if("${CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN}" STREQUAL "")
+      if(CMAKE_HOST_SYSTEM_NAME STREQUAL Linux)
+        set(android_host_tag linux-x86_64)
+      elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL Darwin)
+        set(android_host_tag darwin-x86_64)
+      elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL Windows)
+        set(android_host_tag windows-x86_64)
+      endif()
+
+      if(CMAKE_ANDROID_ARCH_ABI STREQUAL armeabi-v7a)
+        set(android_toolchain_root ${CMAKE_ANDROID_ARCH_HEADER_TRIPLE})
+      elseif(CMAKE_ANDROID_ARCH_ABI STREQUAL arm64-v8a)
+        set(android_toolchain_root ${CMAKE_ANDROID_ARCH_HEADER_TRIPLE})
+      elseif(CMAKE_ANDROID_ARCH_ABI STREQUAL x86)
+        set(android_toolchain_root ${CMAKE_ANDROID_ARCH_ABI})
+      elseif(CMAKE_ANDROID_ARCH_ABI STREQUAL x86_64)
+        set(android_toolchain_root ${CMAKE_ANDROID_ARCH_ABI})
+      endif()
+
+      set(CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN "${CMAKE_ANDROID_NDK}/toolchains/${android_toolchain_root}-4.9/prebuilt/${android_host_tag}")
+    endif()
+
+    list(APPEND compile_flags "-sdk" "${CMAKE_ANDROID_NDK}/platforms/android-${CMAKE_SYSTEM_VERSION}/arch-${CMAKE_ANDROID_ARCH}")
+    list(APPEND compile_flags "-I"   "${CMAKE_ANDROID_NDK}/sysroot/usr/include")
+    list(APPEND compile_flags "-I"   "${CMAKE_ANDROID_NDK}/sysroot/usr/include/${CMAKE_ANDROID_ARCH_HEADER_TRIPLE}")
+
+    list(APPEND link_flags "-sdk"             "${CMAKE_ANDROID_NDK}/platforms/android-${CMAKE_SYSTEM_VERSION}/arch-${CMAKE_ANDROID_ARCH}")
+    list(APPEND link_flags "-tools-directory" "${CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN}/${CMAKE_ANDROID_ARCH_HEADER_TRIPLE}/bin")
+    list(APPEND link_flags "-L"               "${CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN}/lib/gcc/${CMAKE_ANDROID_ARCH_HEADER_TRIPLE}/4.9.x")
+    list(APPEND link_flags "-L"               "${CMAKE_ANDROID_NDK}/sources/cxx-stl/llvm-libc++/libs/${CMAKE_ANDROID_ARCH_ABI}")
+  endif()
 
   if(AST_TARGET)
     list(APPEND compile_flags -target;${AST_TARGET})
@@ -44,11 +77,33 @@ function(add_swift_target target)
       list(APPEND link_flags ${flag})
     endforeach()
   endif()
+  if(AST_LIBRARY)
+    if(AST_STATIC AND AST_SHARED)
+      message(SEND_ERROR "add_swift_target asked to create library as STATIC and SHARED")
+    elseif(AST_STATIC OR NOT BUILD_SHARED_LIBS)
+      set(library_kind STATIC)
+    elseif(AST_SHARED OR BUILD_SHARED_LIBS)
+      set(library_kind SHARED)
+    endif()
+  else()
+    if(AST_STATIC OR AST_SHARED)
+      message(SEND_ERROR "add_swift_target asked to create executable as STATIC or SHARED")
+    endif()
+  endif()
   if(NOT AST_OUTPUT)
     if(AST_LIBRARY)
-      set(AST_OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${target}.dir/${CMAKE_SHARED_LIBRARY_PREFIX}${target}${CMAKE_SHARED_LIBRARY_SUFFIX})
+      if(AST_SHARED OR BUILD_SHARED_LIBS)
+        set(AST_OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${target}.dir/${CMAKE_SHARED_LIBRARY_PREFIX}${target}${CMAKE_SHARED_LIBRARY_SUFFIX})
+      else()
+        set(AST_OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${target}.dir/${CMAKE_STATIC_LIBRARY_PREFIX}${target}${CMAKE_STATIC_LIBRARY_SUFFIX})
+      endif()
     else()
       set(AST_OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${target}.dir/${target}${CMAKE_EXECUTABLE_SUFFIX})
+    endif()
+  endif()
+  if(CMAKE_SYSTEM_NAME STREQUAL Windows)
+    if(AST_SHARED OR BUILD_SHARED_LIBS)
+      set(IMPORT_LIBRARY ${CMAKE_CURRENT_BINARY_DIR}/${target}.dir/${CMAKE_IMPORT_LIBRARY_PREFIX}${target}${CMAKE_IMPORT_LIBRARY_SUFFIX})
     endif()
   endif()
 
@@ -113,19 +168,42 @@ function(add_swift_target target)
   if(AST_LIBRARY)
     set(emit_library -emit-library)
   endif()
-  add_custom_command(OUTPUT
-                       ${AST_OUTPUT}
-                     DEPENDS
-                       ${objs}
-                       ${AST_DEPENDS}
-                     COMMAND
-                       ${CMAKE_SWIFT_COMPILER} ${emit_library} ${link_flags} -o ${AST_OUTPUT} ${objs})
-  add_custom_target(${target}
-                    ALL
-                    DEPENDS
-                       ${AST_OUTPUT}
-                       ${module}
-                       ${documentation})
+  if(NOT AST_LIBRARY OR library_kind STREQUAL SHARED)
+    add_custom_command(OUTPUT
+                         ${AST_OUTPUT}
+                       DEPENDS
+                         ${objs}
+                         ${AST_DEPENDS}
+                       COMMAND
+                         ${CMAKE_SWIFT_COMPILER} ${emit_library} ${link_flags} -o ${AST_OUTPUT} ${objs})
+    add_custom_target(${target}
+                      ALL
+                      DEPENDS
+                         ${AST_OUTPUT}
+                         ${module}
+                         ${documentation})
+  else()
+    add_library(${target}-static STATIC ${objs})
+    if(AST_DEPENDS)
+      add_dependencies(${target}-static ${AST_DEPENDS})
+    endif()
+    get_filename_component(ast_output_bn ${AST_OUTPUT} NAME)
+    string(REGEX REPLACE "^${CMAKE_STATIC_LIBRARY_PREFIX}" "" ast_output_bn ${ast_output_bn})
+    string(REGEX REPLACE "${CMAKE_STATIC_LIBRARY_SUFFIX}$" "" ast_output_bn ${ast_output_bn})
+    get_filename_component(ast_output_dn ${AST_OUTPUT} DIRECTORY)
+    set_target_properties(${target}-static
+                          PROPERTIES
+                            LINKER_LANGUAGE C
+                            ARCHIVE_OUTPUT_DIRECTORY ${ast_output_dn}
+                            OUTPUT_DIRECTORY ${ast_output_dn}
+                            OUTPUT_NAME ${ast_output_bn})
+    add_custom_target(${target}
+                      ALL
+                      DEPENDS
+                        ${target}-static
+                        ${module}
+                        ${documentation})
+  endif()
 
   if(AST_RESOURCES)
     add_custom_command(TARGET
@@ -136,15 +214,29 @@ function(add_swift_target target)
                        COMMAND
                          ${CMAKE_COMMAND} -E copy ${AST_OUTPUT} ${CMAKE_CURRENT_BINARY_DIR}/${target}
                        COMMAND
-                         ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/${target}/Resources
-                       COMMAND
-                         ${CMAKE_COMMAND} -E copy ${AST_RESOURCES} ${CMAKE_CURRENT_BINARY_DIR}/${target}/Resources)
+                         ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/${target}/Resources)
+    foreach(resource ${AST_RESOURCES})
+      add_custom_command(TARGET
+                           ${target}
+                         POST_BUILD
+                         COMMAND
+                           ${CMAKE_COMMAND} -E copy ${resource} ${CMAKE_CURRENT_BINARY_DIR}/${target}/Resources/)
+    endforeach()
   else()
     add_custom_command(TARGET
                          ${target}
                        POST_BUILD
                        COMMAND
                          ${CMAKE_COMMAND} -E copy ${AST_OUTPUT} ${CMAKE_CURRENT_BINARY_DIR})
+    if(CMAKE_SYSTEM_NAME STREQUAL Windows)
+      if(AST_SHARED OR BUILD_SHARED_LIBS)
+        add_custom_command(TARGET
+                             ${target}
+                           POST_BUILD
+                           COMMAND
+                             ${CMAKE_COMMAND} -E copy ${IMPORT_LIBRARY} ${CMAKE_CURRENT_BINARY_DIR})
+      endif()
+    endif()
   endif()
 endfunction()
 
@@ -178,11 +270,15 @@ function(get_swift_host_arch result_var_name)
     set("${result_var_name}" "armv6" PARENT_SCOPE)
   elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "armv7l")
     set("${result_var_name}" "armv7" PARENT_SCOPE)
+  elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "armv7-a")
+    set("${result_var_name}" "armv7" PARENT_SCOPE)
   elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "AMD64")
     set("${result_var_name}" "x86_64" PARENT_SCOPE)
   elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "IA64")
     set("${result_var_name}" "itanium" PARENT_SCOPE)
   elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "x86")
+    set("${result_var_name}" "i686" PARENT_SCOPE)
+  elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "i686")
     set("${result_var_name}" "i686" PARENT_SCOPE)
   else()
     message(FATAL_ERROR "Unrecognized architecture on host system: ${CMAKE_SYSTEM_PROCESSOR}")
